@@ -1,0 +1,61 @@
+name: Graphify source snapshot
+
+on:
+  push:
+    branches: [test/graphify-drive-20261111]
+  schedule:
+    - cron: '20 20 * * *' # 03:20 Asia/Ho_Chi_Minh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: graphify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  graphify:
+    if: github.event_name != 'schedule' || (github.ref == 'refs/heads/main' && vars.GRAPHIFY_SCHEDULE_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned Graphify
+        run: |
+          python3 -m pip install --user pipx
+          python3 -m pipx install graphifyy==0.9.105
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Stage only approved tracked application source
+        run: |
+          source_dir="$RUNNER_TEMP/graphify-pti-source"
+          mkdir -p "$source_dir/admin-gdv"
+          git show HEAD:index.html > "$source_dir/index.html"
+          git show HEAD:admin-gdv/admin-gdv.js > "$source_dir/admin-gdv/admin-gdv.js"
+      - name: Generate and validate source graph
+        working-directory: ${{ runner.temp }}/graphify-pti-source
+        run: |
+          graphify update .
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          output = Path("graphify-out")
+          graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+          if not graph.get("nodes"):
+              raise SystemExit("Graphify produced an empty source graph")
+          files = [output / name for name in ("graph.json", "GRAPH_REPORT.md", "graph.html")]
+          if sum(path.stat().st_size for path in files if path.is_file()) > 20 * 1024 * 1024:
+              raise SystemExit("Graphify outputs exceed the backup size limit")
+          PY
+      - name: Upload graph artifact for the read-only backup App
+        uses: actions/upload-artifact@v4
+        with:
+          name: graphify-pti-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/graphify-pti-source/graphify-out/graph.json
+            ${{ runner.temp }}/graphify-pti-source/graphify-out/GRAPH_REPORT.md
+            ${{ runner.temp }}/graphify-pti-source/graphify-out/graph.html
+          if-no-files-found: error
+          retention-days: 7
